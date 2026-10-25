@@ -1,0 +1,20 @@
+[project]
+name = "beatref"
+version = "0.1.0"
+description = "Reference beat tracker and evaluation harness for the vcvtempodetector VCV Rack module"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "soundfile", "mir_eval"]
+
+[project.optional-dependencies]
+plot = ["matplotlib"]
+
+[project.scripts]
+beatref = "beatref.__main__:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["beatref"]
