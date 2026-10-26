@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  RACK_SDK_VERSION: 2.6.6
+
+jobs:
+  version:
+    name: Plugin version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check plugin.json version
+        run: |
+          version=$(jq -r .version plugin/plugin.json)
+          [[ $version =~ ^2\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error file=plugin/plugin.json::version '$version' must be 2.MINOR.PATCH (the major must match Rack's)"
+            exit 1
+          }
+          [ "$GITHUB_EVENT_NAME" = pull_request ] || exit 0
+          base=$(git show "origin/$GITHUB_BASE_REF:plugin/plugin.json" | jq -r .version)
+          if ! git diff --quiet "origin/$GITHUB_BASE_REF...HEAD" -- plugin/src plugin/res plugin/Makefile && [ "$version" = "$base" ]; then
+            echo "::warning file=plugin/plugin.json::plugin code changed but version is still $base; bump it unless the change is cosmetic"
+          fi
+
+  parity:
+    name: C++ engine matches the Python reference
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e python
+      - run: make -C plugin beattrack
+      - run: beatref synth data/synth
+      - run: beatref compare data/synth
+      - run: beatref --set odf=complex compare data/synth
+
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc 2.28 baseline, so the plugin loads on distros older than the runner
+          - platform: lin-x64
+            runner: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            setup: dnf install -y -q jq zstd unzip
+          - platform: win-x64
+            runner: ubuntu-24.04
+            setup: sudo apt-get update -q && sudo apt-get install -y -q g++-mingw-w64-x86-64-posix jq zstd
+            make: MACHINE=x86_64-w64-mingw32 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ STRIP=x86_64-w64-mingw32-strip
+          - platform: mac-x64
+            runner: macos-15
+            setup: brew install jq zstd rsync
+            make: CROSS_COMPILE=x86_64-apple-darwin
+          - platform: mac-arm64
+            runner: macos-15
+            setup: brew install jq zstd rsync
+            make: CROSS_COMPILE=arm64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@v4
+      - run: ${{ matrix.setup }}
+      - name: Fetch Rack SDK
+        run: |
+          curl -sSfL -o sdk.zip "https://vcvrack.com/downloads/Rack-SDK-$RACK_SDK_VERSION-${{ matrix.platform }}.zip"
+          unzip -q sdk.zip
+      - run: make -C plugin -j4 dist RACK_DIR="$PWD/Rack-SDK" ${{ matrix.make }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.platform }}
+          path: plugin/dist/*-${{ matrix.platform }}.vcvplugin
+          if-no-files-found: error
+
+  release:
+    name: Tag and release new version
+    needs: [version, parity, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Is this version unreleased?
+        id: version
+        run: |
+          version=$(jq -r .version plugin/plugin.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+            echo "::notice::v$version is already tagged; nothing to release"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.version.outputs.new
+        with:
+          pattern: plugin-*
+          path: dist
+          merge-multiple: true
+      - name: Create tag and release
+        if: steps.version.outputs.new
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ls -l dist
+          gh release create "v$VERSION" dist/*.vcvplugin \
+            --target "$GITHUB_SHA" --title "Beat Detector $VERSION" --generate-notes

@@ -1,7 +1,7 @@
 {
   "slug": "un1tz3r0-BeatDetector",
   "name": "Beat Detector",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "license": "GPL-3.0-or-later",
   "brand": "un1tz3r0",
   "author": "un1tz3r0",
@@ -11,7 +11,7 @@
   "manualUrl": "https://github.com/un1tz3r0/vcvtempodetector/tree/main/plugin#readme",
   "sourceUrl": "https://github.com/un1tz3r0/vcvtempodetector",
   "donateUrl": "",
-  "changelogUrl": "",
+  "changelogUrl": "https://github.com/un1tz3r0/vcvtempodetector/releases",
   "modules": [
     {
       "slug": "BeatDetector",
