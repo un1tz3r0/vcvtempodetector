@@ -14,5 +14,14 @@ and time offsets cancel any delay downstream.
 
 Every stage keeps the same tracker and oscillator back end and changes only what feeds it.
 
+## Releases
+
+Download the `.vcvplugin` for your platform from
+[Releases](https://github.com/un1tz3r0/vcvtempodetector/releases) and drop it in Rack's `plugins`
+folder. CI builds every Rack platform (Linux x64, Windows x64, macOS x64 and arm64) on each PR and
+push; merging a PR that bumps `version` in [`plugin/plugin.json`](plugin/plugin.json) tags
+`v<version>` and publishes the release. Every non-cosmetic change bumps the version (see
+[CLAUDE.md](CLAUDE.md)).
+
 Licensed under GPL-3.0 (see [LICENSE](LICENSE)). Algorithms ported from madmom are credited in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -12,7 +12,8 @@ make RACK_DIR=~/Rack-SDK install    # into your Rack user folder (needs zstd)
 make beattrack                      # offline driver for python/beatref; no SDK needed
 ```
 
-Tested against Rack SDK 2.6.6 on Linux x64. The code is C++17 (the Makefile overrides the SDK's
+Built against Rack SDK 2.6.6. CI builds Linux x64 (glibc 2.28 baseline, in a manylinux container),
+Windows x64 (MinGW cross-compile, statically linked runtime) and macOS x64 and arm64. The code is C++17 (the Makefile overrides the SDK's
 C++11 default).
 
 ## Panel
