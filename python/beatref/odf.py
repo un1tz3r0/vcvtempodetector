@@ -12,7 +12,7 @@ BANDS = (200.0, 2000.0)  # display band edges [Hz]: low | mid | high
 
 def frame_params(sr, fps):
     hop = round(sr / fps)
-    win = 1 << int(np.ceil(np.log2(0.0464 * sr)))  # 2048 at 44.1 and 48 kHz
+    win = 1 << int(np.ceil(np.log2(0.0464 * sr)))  # 2048 at 44.1 kHz, 4096 at 48 kHz
     return win, hop
 
 

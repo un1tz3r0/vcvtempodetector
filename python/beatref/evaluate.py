@@ -9,6 +9,7 @@ import mir_eval
 import numpy as np
 import soundfile as sf
 
+from .cpp import detect_cpp
 from .detector import detect
 
 AUDIO = {'.wav', '.flac', '.aiff', '.aif', '.au', '.ogg', '.mp3'}
@@ -53,18 +54,18 @@ def score(result, ref):
     return m
 
 
-def score_file(cfg, audio, ann):
+def score_file(cfg, engine, audio, ann):
     x, sr = load_audio(audio)
-    return score(detect(x, sr, cfg), load_beats(ann))
+    return score((detect_cpp if engine == 'cpp' else detect)(x, sr, cfg), load_beats(ann))
 
 
-def evaluate(root, cfg, annotations=None, out=None, jobs=None):
+def evaluate(root, cfg, annotations=None, out=None, jobs=None, engine='py'):
     found = list(pairs(root, annotations))
     if not found:
         raise SystemExit(f'no annotated audio found under {root}')
     rows = []
     with ProcessPoolExecutor(jobs) as pool:
-        for (audio, _), m in zip(found, pool.map(score_file, repeat(cfg), *zip(*found))):
+        for (audio, _), m in zip(found, pool.map(score_file, repeat(cfg), repeat(engine), *zip(*found))):
             rows.append(dict(file=audio.name, **m))
             print(_fmt(audio.stem, m), flush=True)
     mean = {k: float(np.nanmean([r[k] for r in rows])) for k in rows[0] if k != 'file'}

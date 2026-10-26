@@ -5,3 +5,6 @@ build/
 dist/
 data/
 *.png
+plugin/plugin.so
+plugin/plugin.dylib
+plugin/plugin.dll
