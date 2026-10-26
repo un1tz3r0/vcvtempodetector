@@ -1,0 +1,23 @@
+{
+  "slug": "un1tz3r0-BeatDetector",
+  "name": "Beat Detector",
+  "version": "2.0.0",
+  "license": "GPL-3.0-or-later",
+  "brand": "un1tz3r0",
+  "author": "un1tz3r0",
+  "authorEmail": "",
+  "authorUrl": "https://github.com/un1tz3r0",
+  "pluginUrl": "https://github.com/un1tz3r0/vcvtempodetector",
+  "manualUrl": "https://github.com/un1tz3r0/vcvtempodetector/tree/main/plugin#readme",
+  "sourceUrl": "https://github.com/un1tz3r0/vcvtempodetector",
+  "donateUrl": "",
+  "changelogUrl": "",
+  "modules": [
+    {
+      "slug": "BeatDetector",
+      "name": "Beat Detector",
+      "description": "Real-time tempo and beat tracking from audio: a predictive beat clock with phase, bar, BPM and lock outputs",
+      "tags": ["Clock generator", "Analyzer", "Utility"]
+    }
+  ]
+}

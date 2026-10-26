@@ -12,17 +12,22 @@ beatref eval data/ballroom --annotations data/BallroomAnnotations --json ballroo
 beatref track song.wav --out song.beats                      # beat times and beat-in-bar
 beatref plot song.wav --ref song.beats --dur 20              # preview of the module display
 beatref --set follow=0.8 --set odf=flux eval data/synth      # override any Config setting
+beatref compare data/synth                                   # the module's C++ engine against this, beat for beat
+beatref --engine cpp eval data/synth                         # track or eval through the C++ engine
 ```
+
+The C++ commands use `plugin/build/beattrack` (`make beattrack` in `plugin/`), or the binary
+named by `$BEATTRACK`.
 
 ## Pipeline
 
 1. **Onset detection** (`odf.py`). Causal framing: frame *i* ends at sample (*i*+1)·hop, so
-   nothing depends on the future. 100 frames/s, a 2048-sample Hann window at 44.1/48 kHz (the
-   window scales with the sample rate rather than resampling). SuperFlux by default: a
-   24 bands/octave log filterbank, `log10(1 + x)`, and a positive difference against a
-   3-band maximum filter of the previous frame. Spectral flux, rectified complex domain and HFC
-   (rectified rise) are selectable. The filterbank ODFs are summed separately for the low
-   (< 200 Hz), mid and high (> 2 kHz) bands.
+   nothing depends on the future. 100 frames/s, and a Hann window of 46 ms rounded up to a power
+   of two: 2048 samples at 44.1 kHz, 4096 at 48 kHz. It scales with the sample rate rather than
+   resampling. SuperFlux by default: a 24 bands/octave log filterbank, `log10(1 + x)`, and a
+   positive difference against a 3-band maximum filter of the previous frame. Spectral flux,
+   rectified complex domain and HFC (rectified rise) are selectable. The filterbank ODFs are
+   summed separately for the low (< 200 Hz), mid and high (> 2 kHz) bands.
 2. **Activation**. Each band is normalised by its own running mean (1 s) and peak follower
    (3 s release), so a kick counts as much as a hi-hat. The low band is weighted ×2, the
    result is compressed (γ = 0.75), and the activation is held at its floor below −60 dBFS.

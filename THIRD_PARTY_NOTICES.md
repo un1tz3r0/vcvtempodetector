@@ -1,6 +1,6 @@
 # Third-party notices
 
-`python/beatref/tracker.py` and `python/beatref/odf.py` port algorithms from [madmom](https://github.com/CPJKU/madmom) (the beat state space, transition and observation models of `madmom.features.beats_hmm`, the forward algorithm of `madmom.ml.hmm`, and the SuperFlux front end). No madmom model files are included. madmom source code is distributed under this licence:
+`python/beatref/tracker.py` and `python/beatref/odf.py`, and their C++ counterparts `plugin/src/dsp/BeatTracker.cpp` and `plugin/src/dsp/OnsetDetector.cpp`, port algorithms from [madmom](https://github.com/CPJKU/madmom) (the beat state space, transition and observation models of `madmom.features.beats_hmm`, the forward algorithm of `madmom.ml.hmm`, and the SuperFlux front end). No madmom model files are included. madmom source code is distributed under this licence:
 
 ```
 Copyright (c) 2012-2014 Department of Computational Perception,
