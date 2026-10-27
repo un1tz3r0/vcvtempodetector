@@ -9,7 +9,7 @@ and time offsets cancel any delay downstream.
 | --- | --- | --- |
 | 0 | Python reference tracker and evaluation harness ([`python/`](python/)) | done |
 | 1 | C++ DSP module ([`plugin/`](plugin/)): onset detection, online HMM tracker, flywheel oscillator, display | done |
-| 2 | Neural activations (causal TCN, our own weights, RTNeural): training and model in [`python/`](python/#neural-activation-stage-2); module inference next | in progress |
+| 2 | Neural activations ([`python/`](python/#neural-activation-stage-2)): a causal TCN with our own weights, beat and downbeat, run through RTNeural on a worker thread; user-loadable models | done |
 | 3 | Learning mode: adapt the model to your material from audio plus a clock | planned |
 
 Every stage keeps the same tracker and oscillator back end and changes only what feeds it.

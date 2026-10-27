@@ -1,5 +1,10 @@
 #include "BeatDetector.hpp"
 
+#include <osdialog.h>
+
+#include <fstream>
+#include <sstream>
+
 #include "Waterfall.hpp"
 
 const std::vector<float> BeatDetector::RATIOS = {1 / 8.f, 1 / 6.f, 1 / 4.f, 1 / 3.f, 1 / 2.f, 2 / 3.f, 1, 3 / 2.f, 2, 3, 4, 6, 8};
@@ -71,6 +76,44 @@ BeatDetector::BeatDetector() {
 	configDivider.setDivision(64);
 	lightDivider.setDivision(32);
 	engine.reset(new beat::Engine(settings(), APP->engine->getSampleRate()));
+	applyModel();
+}
+
+BeatDetector::~BeatDetector() {
+	delete incoming.exchange(nullptr);
+	delete retired.exchange(nullptr);
+}
+
+static std::string readFile(const std::string& path) {
+	std::ifstream in(path);
+	std::stringstream text;
+	text << in.rdbuf();
+	return text.str();
+}
+
+bool BeatDetector::applyModel(double sampleRate) {
+	collect();  // also frees the old model where no widget runs, as in headless Rack
+	std::unique_ptr<Swap> swap(new Swap);
+	if (neural) {
+		static const std::string builtin = readFile(asset::plugin(pluginInstance, "res/models/beat.json"));
+		try {
+			bool own = !modelJson.empty();
+			swap->next.reset(new beat::Inference(beat::Network::fromJson(own ? modelJson : builtin, own ? modelName : "built-in model"),
+				sampleRate > 0 ? sampleRate : APP->engine->getSampleRate(), beat::Config().fps, true));
+		}
+		catch (const std::exception& e) {
+			modelError = e.what();
+			WARN("Beat Detector: %s", e.what());
+			return false;
+		}
+	}
+	modelError.clear();
+	delete incoming.exchange(swap.release());  // supersedes a swap the audio thread hasn't taken yet
+	return true;
+}
+
+void BeatDetector::collect() {
+	delete retired.exchange(nullptr);
 }
 
 beat::Config BeatDetector::settings() {
@@ -118,6 +161,12 @@ double BeatDetector::bpmVoltage(double bpm) const {
 }
 
 void BeatDetector::process(const ProcessArgs& args) {
+	// The old inference is freed off the audio thread, so wait until the last one has been collected.
+	if (!retired.load(std::memory_order_acquire))
+		if (Swap* s = incoming.exchange(nullptr)) {
+			s->next = engine->setInference(std::move(s->next));
+			retired.store(s, std::memory_order_release);
+		}
 	if (configDivider.process() || pendingReset)
 		engine->configure(settings());
 	if (pendingReset.exchange(false))
@@ -189,6 +238,7 @@ void BeatDetector::process(const ProcessArgs& args) {
 void BeatDetector::onSampleRateChange(const SampleRateChangeEvent& e) {
 	engine.reset(new beat::Engine(settings(), e.sampleRate));
 	frames.clear();
+	applyModel(e.sampleRate);
 }
 
 void BeatDetector::onReset(const ResetEvent& e) {
@@ -201,8 +251,12 @@ void BeatDetector::onReset(const ResetEvent& e) {
 	autoDownbeat = false;
 	zoom = 1;
 	scheme = SCHEME_SPECTRUM;
+	neural = true;
+	modelJson.clear();
+	modelName.clear();
 	engine.reset(new beat::Engine(settings(), APP->engine->getSampleRate()));
 	frames.clear();
+	applyModel();
 }
 
 json_t* BeatDetector::dataToJson() {
@@ -215,6 +269,11 @@ json_t* BeatDetector::dataToJson() {
 	json_object_set_new(root, "autoDownbeat", json_boolean(autoDownbeat));
 	json_object_set_new(root, "zoom", json_integer(zoom));
 	json_object_set_new(root, "scheme", json_integer(scheme));
+	json_object_set_new(root, "neural", json_boolean(neural));
+	if (!modelJson.empty()) {  // a loaded model travels with the patch
+		json_object_set_new(root, "modelName", json_string(modelName.c_str()));
+		json_object_set_new(root, "modelJson", json_string(modelJson.c_str()));
+	}
 	return root;
 }
 
@@ -232,6 +291,17 @@ void BeatDetector::dataFromJson(json_t* root) {
 	integer("scheme", scheme, 0, 1);
 	if (json_t* j = json_object_get(root, "autoDownbeat"))
 		autoDownbeat = json_boolean_value(j);
+	json_t* j = json_object_get(root, "neural");
+	neural = j && json_boolean_value(j);  // patches from before 2.1 keep the ODF they were made with
+	j = json_object_get(root, "modelJson");
+	modelJson = j ? json_string_value(j) : "";
+	j = json_object_get(root, "modelName");
+	modelName = j ? json_string_value(j) : "";
+	if (!applyModel()) {
+		modelJson.clear();
+		modelName.clear();
+		applyModel();
+	}
 	pendingReset = true;  // picks up the loaded warm start
 }
 
@@ -367,6 +437,31 @@ struct BeatDetectorWidget : ModuleWidget {
 			mm2px(Vec(column(lights[1].second, 8) + 5.3f, outputY - 4.6f)), module, lights[1].first));
 	}
 
+	void step() override {
+		if (BeatDetector* m = getModule<BeatDetector>())
+			m->collect();
+		ModuleWidget::step();
+	}
+
+	static void loadModel(BeatDetector* m) {
+		osdialog_filters* filters = osdialog_filters_parse("RTNeural JSON:json");
+		char* path = osdialog_file(OSDIALOG_OPEN, nullptr, nullptr, filters);
+		osdialog_filters_free(filters);
+		if (!path)
+			return;
+		std::string oldJson = m->modelJson, oldName = m->modelName;
+		bool wasNeural = m->neural;
+		m->modelJson = readFile(path);
+		m->modelName = system::getFilename(path);
+		m->neural = true;
+		std::free(path);
+		if (!m->applyModel()) {
+			m->modelJson = oldJson;
+			m->modelName = oldName;
+			m->neural = wasNeural;
+		}
+	}
+
 	void appendContextMenu(Menu* menu) override {
 		BeatDetector* m = getModule<BeatDetector>();
 		auto slider = [&](Menu* into, int param) { into->addChild(new ParamSlider(m->paramQuantities[param])); };
@@ -379,6 +474,27 @@ struct BeatDetectorWidget : ModuleWidget {
 			sub->addChild(createMenuLabel("Preferred range, for half/double tempo"));
 			slider(sub, BeatDetector::PREF_MIN_BPM_PARAM);
 			slider(sub, BeatDetector::PREF_MAX_BPM_PARAM);
+		}));
+		menu->addChild(createSubmenuItem("Beat activation", m->neural ? "Neural" : "ODF", [=](Menu* sub) {
+			sub->addChild(createCheckMenuItem("Neural network", "", [=]() { return m->neural; }, [=]() {
+				m->neural = true;
+				m->applyModel();
+			}));
+			sub->addChild(createCheckMenuItem("Onset detection function", "", [=]() { return !m->neural; }, [=]() {
+				m->neural = false;
+				m->applyModel();
+			}));
+			sub->addChild(new MenuSeparator);
+			sub->addChild(createMenuLabel("Model: " + (m->modelJson.empty() ? std::string("built-in") : m->modelName)));
+			sub->addChild(createMenuItem("Load RTNeural JSON…", "", [=]() { loadModel(m); }));
+			sub->addChild(createMenuItem("Use the built-in model", "", [=]() {
+				m->modelJson.clear();
+				m->modelName.clear();
+				m->neural = true;
+				m->applyModel();
+			}, m->modelJson.empty()));
+			if (!m->modelError.empty())
+				sub->addChild(createMenuLabel(m->modelError));
 		}));
 		menu->addChild(createIndexPtrSubmenuItem("Onset detection", {"SuperFlux", "Spectral flux", "Complex domain", "HFC"}, &m->odf));
 		menu->addChild(createIndexPtrSubmenuItem("BPM CV scaling",
@@ -407,7 +523,7 @@ struct BeatDetectorWidget : ModuleWidget {
 			slider(sub, BeatDetector::NUDGE_RATE_PARAM);
 		}));
 		menu->addChild(createSubmenuItem("Outputs", "", [=](Menu* sub) { slider(sub, BeatDetector::TRIGGER_WIDTH_PARAM); }));
-		menu->addChild(createBoolPtrMenuItem("Automatic downbeat guess (experimental)", "", &m->autoDownbeat));
+		menu->addChild(createBoolPtrMenuItem("Automatic downbeat", m->neural ? "network" : "low band", &m->autoDownbeat));
 		menu->addChild(createSubmenuItem("Display", "", [=](Menu* sub) {
 			sub->addChild(createIndexPtrSubmenuItem("Zoom", {"3 s", "6 s", "12 s", "24 s"}, &m->zoom));
 			sub->addChild(createIndexPtrSubmenuItem("Colours", {"Spectrum (low warm, mid green, high blue)", "Mono"}, &m->scheme));

@@ -5,6 +5,7 @@
 
 #include "BeatTracker.hpp"
 #include "Config.hpp"
+#include "Inference.hpp"
 #include "OnsetDetector.hpp"
 #include "Oscillator.hpp"
 
@@ -13,7 +14,7 @@ namespace beat {
 /** Per-frame summary: what the display draws and what the comparison harness prints. */
 struct Frame {
 	double time = 0;            // end of the frame [s]
-	float env = 0, bands[3] = {}, odf[3] = {}, act = 0;
+	float env = 0, bands[3] = {}, odf[3] = {}, act = 0;  // act: what the tracker last consumed (ODF or network)
 	float bpm = 0, phase = 0, conf = 0;
 	bool locked = false, held = false;
 	float beatAt = -1;          // seconds before `time` of a beat fired during the frame, or -1
@@ -30,9 +31,10 @@ struct Output {
 	double beatPhase = 0, barPhase = 0;  // [0, 1)
 };
 
-/** The whole chain, sample by sample: onset detection, activation normalisation, tracker,
-confidence and lock (python/beatref/detector.py), then the oscillator at audio rate with the
-bar counter, the clock ×/÷ divider and the module's manual controls. */
+/** The whole chain, sample by sample: onset detection, activation normalisation (or a neural
+network's activation), tracker, confidence and lock (python/beatref/detector.py), then the
+oscillator at audio rate with the bar counter, the clock ×/÷ divider and the module's manual
+controls. */
 class Engine {
 public:
 	Engine(const Config& cfg, double sampleRate);
@@ -44,6 +46,13 @@ public:
 
 	/** One mono sample, full scale ±1. */
 	Output process(double x);
+
+	/** Take the activation from a network (nullptr: back to the ODF). Returns the previous one, to
+	be destroyed off the audio thread. */
+	std::unique_ptr<Inference> setInference(std::unique_ptr<Inference> next);
+	const Inference* inference() const { return neural.get(); }
+	/** Delay of the activation behind the audio [s]: the network's, or the ODF's setting. */
+	double latency() const { return neural ? neural->network().latency() : cfg.latency; }
 
 	bool frameReady() const { return newFrame; }
 	const Frame& frame() const { return current; }
@@ -67,17 +76,20 @@ public:
 
 private:
 	void analyse(const OdfFrame& f);
+	void track(double act, double down);
 	void schedule(double pull);
 	void seed(double bpm, int64_t beatSample);
 	void trackTaps(std::array<int64_t, 4>& times, int& count, int64_t at, bool seedNow);
 	void resyncClock(double ref);
-	void guessDownbeat(double lowAct);
+	void guessDownbeat(double act, int64_t lag);
 	double barPos(double value) const;
 
 	Config cfg;
 	double sr, dt = 0.01;
 	std::unique_ptr<OnsetDetector> detector;
 	std::unique_ptr<BeatTracker> tracker;
+	std::unique_ptr<Inference> neural;
+	bool fed = false;           // the network is fed from a frame boundary on, so both frame grids line up
 	Oscillator osc;
 	BeatTracker::Estimate estimate{120, 0, 0};
 
@@ -91,6 +103,8 @@ private:
 
 	// timing
 	int64_t sampleCount = 0, frames = 0;
+	int64_t tracked = 0;        // frames the tracker has consumed; behind `frames` while the network catches up
+	double shownAct = 0;
 	int segPos = 0;
 	double value = 0;
 
@@ -106,6 +120,8 @@ private:
 	int64_t clockFired = 0;
 	double lastRatio = 0;
 	std::array<double, 16> downbeat{};
+	std::array<std::pair<int64_t, double>, 2 * 64> pendingDown{};  // (frame, downbeat activation) tracked this frame
+	int pendingDowns = 0;
 
 	bool held = false, clockConnected = false;
 	int nudgeDir = 0, lastNudge = 0;

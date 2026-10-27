@@ -86,10 +86,24 @@ Output Engine::process(double x) {
 	o.barPhase = barPos(value) / cfg.beatsPerBar;
 
 	OdfFrame f;
-	if (detector->push(x, f))
+	bool done = detector->push(x, f);
+	if (neural) {
+		if (fed)
+			neural->push(x, frames, done && f.env > quiet);  // completes a frame exactly when the detector does
+		fed = fed || done;
+	}
+	if (done)
 		analyse(f);
 	sampleCount++;
 	return o;
+}
+
+std::unique_ptr<Inference> Engine::setInference(std::unique_ptr<Inference> next) {
+	std::swap(neural, next);
+	fed = sampleCount == 0;
+	tracked = frames;
+	downbeat.fill(0);
+	return next;
 }
 
 void Engine::analyse(const OdfFrame& f) {
@@ -106,14 +120,6 @@ void Engine::analyse(const OdfFrame& f) {
 	}
 	double act = std::clamp(f.env > quiet ? std::pow(a, cfg.actGamma) : 0.0, cfg.actFloor, 1 - cfg.actFloor);
 
-	double pull = 0;
-	for (auto& e : events)
-		if (e.first >= 0 && e.first <= frames) {
-			if (e.first == frames)
-				pull = std::max(pull, e.second);
-			e = {-1, 0};
-		}
-
 	if (nudgeDir) {
 		double d = nudgeDir * cfg.nudgeRate * dt;
 		tracker->nudge(d);
@@ -123,20 +129,29 @@ void Engine::analyse(const OdfFrame& f) {
 		tracker->endNudge();
 	lastNudge = nudgeDir;
 
-	bool deaf = clockConnected && cfg.clockPull >= 1;
-	estimate = tracker->step(held || deaf ? -1 : act, pull);
-	double bpm = estimate.bpm, phase = wrap(estimate.phase + cfg.latency * bpm / 60);
-	evidence += kConf * (estimate.evidence / dt - evidence);  // nats per second
-	conf = 1 / (1 + std::exp(-evidence / cfg.confScale));
-	lock = conf > (lock ? cfg.lockOff : cfg.lockOn);
+	pendingDowns = 0;
+	if (neural) {
+		Inference::Result r;
+		while (neural->pop(r)) {
+			while (tracked < r.frame)
+				track(-1, -1);  // a frame the worker dropped: the tracker predicts without observing
+			track(std::clamp(r.loud ? r.beat : 0.0, cfg.actFloor, 1 - cfg.actFloor), neural->network().hasDownbeat() ? r.downbeat : -1);
+		}
+	}
+	else
+		track(act, f.columns == 3 ? low : -1);
+
+	// the tracker's phase describes the audio `lag` frames plus the activation latency ago
+	int64_t lag = frames + 1 - tracked;
+	double bpm = estimate.bpm, phase = wrap(estimate.phase + (latency() + lag * dt) * bpm / 60);
 
 	bool wasActive = osc.active;
 	osc.step(bpm, phase + bpm / 60 * dt, lock, held);
 	segPos = 0;
 	if (osc.active && !wasActive)
 		resyncClock(osc.from);
-	if (cfg.autoDownbeat && f.columns == 3)
-		guessDownbeat(low);
+	for (int i = 0; i < pendingDowns; i++)
+		guessDownbeat(pendingDown[i].second, frames - pendingDown[i].first);
 	frames++;
 
 	Frame& r = current;
@@ -146,7 +161,7 @@ void Engine::analyse(const OdfFrame& f) {
 		r.bands[i] = f.bands[i];
 		r.odf[i] = f.odf[i];
 	}
-	r.act = act;
+	r.act = shownAct;
 	r.bpm = bpm;
 	r.phase = phase;
 	r.conf = conf;
@@ -164,6 +179,26 @@ void Engine::analyse(const OdfFrame& f) {
 	newFrame = true;
 }
 
+void Engine::track(double act, double down) {
+	double pull = 0;
+	for (auto& e : events)
+		if (e.first >= 0 && e.first <= tracked) {
+			if (e.first == tracked)
+				pull = std::max(pull, e.second);
+			e = {-1, 0};
+		}
+	bool deaf = clockConnected && cfg.clockPull >= 1;
+	estimate = tracker->step(held || deaf || act < 0 ? -1 : act, pull);
+	evidence += kConf * (estimate.evidence / dt - evidence);  // nats per second
+	conf = 1 / (1 + std::exp(-evidence / cfg.confScale));
+	lock = conf > (lock ? cfg.lockOff : cfg.lockOn);
+	if (cfg.autoDownbeat && down >= 0 && pendingDowns < int(pendingDown.size()))
+		pendingDown[pendingDowns++] = {tracked, down};
+	if (act >= 0)
+		shownAct = act;
+	tracked++;
+}
+
 double Engine::barPos(double v) const {
 	return wrap(v - barOrigin, cfg.beatsPerBar);
 }
@@ -174,7 +209,7 @@ void Engine::resyncClock(double ref) {
 }
 
 void Engine::schedule(double pull) {
-	int64_t k = frames + int64_t(std::lround(cfg.latency * detector->fps()));  // line up with the lagging activation
+	int64_t k = frames + int64_t(std::lround(latency() * detector->fps()));  // line up with the lagging activation
 	auto slot = std::find_if(events.begin(), events.end(), [](auto& e) { return e.first < 0; });
 	if (slot != events.end())
 		*slot = {k, pull};
@@ -208,8 +243,8 @@ void Engine::clock() {
 void Engine::seed(double bpm, int64_t beatSample) {
 	// The tracker's phase lags true time by the ODF latency; the oscillator's phase is true time
 	// at the end of the frame now being rendered.
-	double bps = bpm / 60, frameEnd = double(frames) * detector->hop();
-	tracker->reset(bpm, wrap((frameEnd - beatSample) / sr * bps - cfg.latency * bps));
+	double bps = bpm / 60, frameEnd = double(frames) * detector->hop(), trackedEnd = double(tracked) * detector->hop();
+	tracker->reset(bpm, wrap((trackedEnd - beatSample) / sr * bps - latency() * bps));
 	tracker->pin(bpm);
 	osc.seed(bps, (frameEnd + detector->hop() - beatSample) / sr * bps);
 	clockSeeded = true;
@@ -236,17 +271,17 @@ void Engine::barReset() {
 	downbeat.fill(0);
 }
 
-void Engine::guessDownbeat(double lowAct) {
+void Engine::guessDownbeat(double act, int64_t lag) {
 	int bpb = std::min<int>(cfg.beatsPerBar, downbeat.size());
 	double decay = std::exp(-dt / 8.0);
 	for (double& d : downbeat)
 		d *= decay;
 	if (!osc.running || !barKnown || bpb < 2)
 		return;
-	// the activation describes audio from (frame + latency) before the oscillator's phase
-	double u = osc.out() - (dt + cfg.latency) * osc.bps, n = std::round(u);
-	if (std::abs(u - n) < 0.15)
-		downbeat[int(barPos(n))] += lowAct;
+	// the activation describes audio from (1 + lag frames + latency) before the oscillator's phase
+	double u = osc.out() - ((1 + lag) * dt + latency()) * osc.bps, n = std::round(u);
+	if (std::abs(u - n) < 0.08)
+		downbeat[int(barPos(n))] += act;
 	int best = std::max_element(downbeat.begin(), downbeat.begin() + bpb) - downbeat.begin();
 	if (best && downbeat[best] > 1.25 * downbeat[0]) {
 		barOrigin += best;
