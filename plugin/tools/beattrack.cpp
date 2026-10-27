@@ -61,6 +61,13 @@ static std::map<std::string, std::function<void(Config&, const std::string&)>> s
 			{"superflux", Odf::SuperFlux}, {"flux", Odf::Flux}, {"complex", Odf::Complex}, {"hfc", Odf::Hfc}};
 		c.odf = kinds.at(v);
 	};
+	m["auto_downbeat"] = [](Config& c, const std::string& v) { c.autoDownbeat = v == "1" || v == "True" || v == "true"; };
+	m["model"] = [](Config&, const std::string& v) {
+		if (!v.empty()) {
+			std::fprintf(stderr, "this build has no neural inference\n");
+			std::exit(1);
+		}
+	};
 	m["lost"] = [](Config& c, const std::string& v) {
 		static const std::map<std::string, Lost> modes{{"coast", Lost::Coast}, {"stop", Lost::Stop}, {"follow", Lost::Follow}};
 		c.lost = modes.at(v);
