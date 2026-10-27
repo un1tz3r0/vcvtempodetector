@@ -1,8 +1,9 @@
 # Beat Detector (VCV Rack module)
 
-Stage 1 of the plan: the Stage 0 reference (`python/beatref`) ported to C++ and wrapped in a
-28HP Rack module. It listens to audio and outputs a predictive beat clock, with a scrolling
-display of the band-coloured envelope, detected onsets and the beat grid.
+The `python/beatref` reference ported to C++ and wrapped in a 28HP Rack module. It listens to
+audio and outputs a predictive beat clock, with a scrolling display of the band-coloured envelope,
+detected onsets and the beat grid. Since 2.1 the beat activation comes from a small neural network
+(Stage 2) by default; the onset detection function (Stage 1) is still one menu click away.
 
 ## Build
 
@@ -39,14 +40,35 @@ Clock, Tap, Reset, Bar reset (triggers) and Hold (gate: tracking freezes, the os
 Outputs: Beat, Bar and Clock ×/÷ triggers; Beat phase and Bar phase saws (0–10 V); BPM CV;
 Lock gate; Confidence (0–10 V).
 
+## Beat activation
+
+**Neural network** (the default for new modules): a causal convolutional network, 110k
+parameters, trained on Ballroom and GTZAN (see [`python/`](../python/#neural-activation-stage-2)).
+It outputs a beat and a downbeat activation every 10 ms, and the tracker, lock and oscillator
+work as before. It runs through [RTNeural](https://github.com/jatinchowdhury18/RTNeural) on its own
+worker thread. The audio thread only copies samples into a lock-free ring and reads results back,
+and it never waits or makes a system call. The tracker compensates for how many frames the network
+is behind. If the worker falls more than 0.64 s behind, frames are dropped and the tracker coasts
+over them.
+
+**Load RTNeural JSON…** loads another model, for example one trained with `beatref train`. It
+must be a sequential RTNeural model (dense, conv1d, GRU, LSTM, batchnorm, PReLU or activation
+layers) whose input size matches the front end in its `beatref` block. It needs 1 output (beat), 2
+(beat, downbeat) or 3 (softmax over none, beat, downbeat). A loaded model is saved in the patch,
+so the patch works on other machines. A file that doesn't load leaves the current model in place
+and shows the error in the menu. **Use the built-in model** goes back to the built-in model.
+
+**Onset detection function** is the Stage 1 activation. Patches saved before 2.1 keep it.
+
 ## Context menu
 
-Tempo range (60–200 BPM) and preferred range (90–180), onset detection function (SuperFlux,
+Beat activation (above), tempo range (60–200 BPM) and preferred range (90–180), onset detection function (SuperFlux,
 spectral flux, complex domain, HFC), BPM CV scaling (V/oct with 0 V = 120 BPM, 10 V = 300 BPM,
 or 1 V = 100 BPM), warm start (off, a set tempo, or seeded by the first two Clock beats), what
 to do on losing the beat (coast, stop after N bars, keep following) and the re-lock glide, lock
-threshold, clock pull and pulses per beat, tap pull and nudge speed, trigger width, the
-experimental automatic downbeat guess, display zoom and colours. An Advanced submenu exposes the
+threshold, clock pull and pulses per beat, tap pull and nudge speed, trigger width, automatic
+downbeat (bar 1 follows the network's downbeat output, or the low band with the ODF), display
+zoom and colours. An Advanced submenu exposes the
 tracker's tuning (onset latency, low band weight, activation gamma, transition and observation
 λ, preferred range strength, confidence smoothing and scale, silence threshold) with a button to
 restore the defaults.
@@ -56,7 +78,13 @@ restore the defaults.
 `src/dsp/` is the engine and has no Rack dependency: `OnsetDetector` (framing, FFT, the four
 ODFs), `BeatTracker` (the online HMM), `Oscillator` (the flywheel) and `Engine` (activation
 normalisation, confidence and lock, the audio-rate oscillator, bars, the clock divider, and the
-manual controls). `BeatDetector.cpp` is the module and panel; `Waterfall.hpp` is the display. The
+manual controls), plus the neural path: `Features` (the network's filterbank front end),
+`Network` (an RTNeural model and its `beatref` metadata) and `Inference` (the worker thread and
+its rings). `BeatDetector.cpp` is the module and panel; `Waterfall.hpp` is the display. RTNeural
+and nlohmann/json are vendored header-only in `vendor/` and run in double precision with the
+plain C++ backend, so they build on every Rack platform, ARM included, and match the Python
+reference exactly. A new model is built on the UI thread and handed to the audio thread through
+an atomic mailbox; the old one is freed back on the UI thread. The
 audio thread pushes one summary per analysis frame into a lock-free ring buffer, and the display
 draws from that on the UI thread.
 
@@ -65,10 +93,30 @@ draws from that on the UI thread.
 ```sh
 make beattrack
 beatref compare data/synth                     # C++ vs Python, beat for beat
+beatref --set model=plugin/res/models/beat.json --set auto_downbeat=1 compare data/synth
 beatref --engine cpp eval data/ballroom --annotations data/BallroomAnnotations
 ```
 
-Results (2026-10-26):
+`beattrack --threaded` runs the network on the worker thread, as the module does, with the input
+paced at 8× real time. Without it the network runs inline, which is deterministic.
+
+Results (2026-10-27, neural):
+
+- **Parity.** With the built-in model and automatic downbeat on, all 24 synthetic clips produce the
+  same beats and the same bar 1 flags as the Python reference, every beat within 0.023 ms.
+  Threaded runs give the same beats, within 3 ms, because results arrive a frame or two late and
+  the lag compensation absorbs that.
+- **Accuracy.** See the cross-validated results in [`python/`](../python/#results): Ballroom F
+  0.856 against 0.769 for the ODF, and GTZAN F 0.835 against 0.749.
+- **CPU.** Offline at 44.1 kHz, the network and its front end add 0.70% of a core (1.07% at
+  48 kHz) on the worker thread. The audio thread's own cost goes up by about 0.2%. Rack's meter,
+  which counts only the audio thread, reads 0.8–1.3% in a slow cloud VM, the same as with the
+  ODF.
+- **Live.** In Rack 2.6.6 the module locks to and holds a 120 BPM noise-burst pattern. These all
+  work while it runs: switching activation, a user model restored from the patch, falling back
+  from a broken model file, and a pre-2.1 patch (which keeps the ODF).
+
+Results (2026-10-26, ODF):
 
 - **Parity.** All 24 synthetic clips (and 8 more rendered at 48 kHz) produce the same beats as
   the reference, every one within a single sample (0.023 ms). That holds for all four ODFs and

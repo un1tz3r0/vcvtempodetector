@@ -1,6 +1,6 @@
 RACK_DIR ?= ../..
 
-FLAGS += -Isrc
+FLAGS += -Isrc -isystem vendor/RTNeural
 SOURCES += $(wildcard src/*.cpp src/dsp/*.cpp)
 DISTRIBUTABLES += res
 
@@ -16,7 +16,7 @@ endif
 
 build/beattrack: tools/beattrack.cpp $(wildcard src/dsp/*.cpp src/dsp/*.hpp)
 	@mkdir -p build
-	$(CXX) -O3 -funsafe-math-optimizations -std=c++17 -Wall -o $@ tools/beattrack.cpp $(wildcard src/dsp/*.cpp)
+	$(CXX) -O3 -funsafe-math-optimizations -std=c++17 -Wall -isystem vendor/RTNeural -o $@ tools/beattrack.cpp $(wildcard src/dsp/*.cpp) -lpthread
 
 beattrack: build/beattrack
 .PHONY: beattrack

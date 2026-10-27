@@ -2,14 +2,21 @@
 // Reads raw little-endian float64 mono samples from stdin and prints "time<TAB>beat-in-bar" per
 // beat, exactly what `beatref track` prints. Settings use the Python Config names.
 //
-//   beattrack --sr 44100 [--set name=value ...] [--frames frames.tsv] < audio.f64
+//   beattrack --sr 44100 [--set name=value ...] [--threaded] [--frames frames.tsv] < audio.f64
+//
+// `--set model=net.json` takes the activation from a neural network, inline (deterministic) unless
+// `--threaded` runs it on a worker thread as the module does, with the input paced at 8x real time
+// so the worker keeps up as it would in Rack.
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../src/dsp/Engine.hpp"
@@ -62,12 +69,7 @@ static std::map<std::string, std::function<void(Config&, const std::string&)>> s
 		c.odf = kinds.at(v);
 	};
 	m["auto_downbeat"] = [](Config& c, const std::string& v) { c.autoDownbeat = v == "1" || v == "True" || v == "true"; };
-	m["model"] = [](Config&, const std::string& v) {
-		if (!v.empty()) {
-			std::fprintf(stderr, "this build has no neural inference\n");
-			std::exit(1);
-		}
-	};
+	m["model"] = [](Config&, const std::string&) {};  // read in main
 	m["lost"] = [](Config& c, const std::string& v) {
 		static const std::map<std::string, Lost> modes{{"coast", Lost::Coast}, {"stop", Lost::Stop}, {"follow", Lost::Follow}};
 		c.lost = modes.at(v);
@@ -79,6 +81,8 @@ int main(int argc, char** argv) {
 	Config cfg;
 	double sr = 44100;
 	FILE* frames = nullptr;
+	std::string model;
+	bool threaded = false;
 	auto table = settings();
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
@@ -86,9 +90,13 @@ int main(int argc, char** argv) {
 			sr = std::atof(argv[++i]);
 		else if (a == "--frames" && i + 1 < argc)
 			frames = std::fopen(argv[++i], "w");
+		else if (a == "--threaded")
+			threaded = true;
 		else if (a == "--set" && i + 1 < argc) {
 			std::string kv = argv[++i];
 			size_t eq = kv.find('=');
+			if (kv.substr(0, eq) == "model")
+				model = kv.substr(eq + 1);
 			auto it = table.find(kv.substr(0, eq));
 			if (eq == std::string::npos || it == table.end()) {
 				std::fprintf(stderr, "unknown setting %s\n", kv.c_str());
@@ -97,20 +105,34 @@ int main(int argc, char** argv) {
 			it->second(cfg, kv.substr(eq + 1));
 		}
 		else {
-			std::fprintf(stderr, "usage: beattrack --sr RATE [--set name=value ...] [--frames FILE] < samples.f64\n");
+			std::fprintf(stderr, "usage: beattrack --sr RATE [--set name=value ...] [--threaded] [--frames FILE] < samples.f64\n");
 			return 2;
 		}
 	}
 
 	Engine engine(cfg, sr);
+	if (!model.empty()) {
+		try {
+			engine.setInference(std::make_unique<Inference>(Network::fromFile(model), sr, engine.fps(), threaded));
+		}
+		catch (const std::exception& e) {
+			std::fprintf(stderr, "%s\n", e.what());
+			return 1;
+		}
+	}
 	std::vector<double> buf(1 << 16);
-	int64_t n = 0, beats = 0;
+	int64_t n = 0, pos = 0;
 	size_t got;
+	auto start = std::chrono::steady_clock::now();
 	while ((got = std::fread(buf.data(), sizeof(double), buf.size(), stdin)) > 0)
 		for (size_t i = 0; i < got; i++, n++) {
+			if (threaded && n % 64 == 0)
+				std::this_thread::sleep_until(start + std::chrono::duration<double>(n / (8 * sr)));
 			Output o = engine.process(buf[i]);
-			if (o.beat)
-				std::printf("%.6f\t%lld\n", double(n) / sr, (long long)(beats++ % cfg.beatsPerBar + 1));
+			if (o.beat) {
+				pos = o.bar ? 0 : pos + 1;
+				std::printf("%.6f\t%lld\n", double(n) / sr, (long long)(pos + 1));  // can pass beats/bar when bar 1 moves later
+			}
 			if (frames && engine.frameReady()) {
 				const Frame& f = engine.frame();
 				std::fprintf(frames, "%.6f\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%.9g\t%d\n", f.time, f.odf[0], f.odf[1], f.odf[2],

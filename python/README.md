@@ -56,7 +56,7 @@ named by `$BEATTRACK`.
 With `model` set, a network's beat output replaces step 2's activation; the tracker,
 confidence and oscillator are unchanged. Models are RTNeural JSON files (Keras layout) with a
 `beatref` block that holds the front end, the outputs and the latency. `network.py` runs them
-in numpy, and the module will run the same file through RTNeural.
+in numpy, and the module runs the same file through RTNeural.
 
 - **Front end** (`features.py`). The same causal 100 frames/s framing and 46 ms Hann window,
   zero-padded to a power of two. The spectrum is interpolated at the 44.1 kHz / 2048 bin

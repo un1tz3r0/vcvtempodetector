@@ -76,12 +76,24 @@ struct BeatDetector : Module {
 	int zoom = 1;
 	int scheme = SCHEME_SPECTRUM;
 
+	// beat activation: a neural network (the built-in one, or a loaded RTNeural JSON kept in the
+	// patch), or the onset detection function
+	bool neural = true;
+	std::string modelJson, modelName;  // empty: the built-in model
+	std::string modelError;            // why the last model didn't load, for the menu
+
 	std::unique_ptr<beat::Engine> engine;
 	dsp::RingBuffer<beat::Frame, 512> frames;  // audio thread -> display
 	std::atomic<bool> pendingReset{false};
 
 	BeatDetector();
+	~BeatDetector();
 	beat::Config settings();
+	/** Build the network for the current choice and hand it to the audio thread; false (and
+	modelError set) if the model can't be used, in which case the activation is left as it was. */
+	bool applyModel(double sampleRate = 0);
+	/** Delete what the audio thread has swapped out. Never on the audio thread. */
+	void collect();
 	double bpmVoltage(double bpm) const;
 
 	void process(const ProcessArgs& args) override;
@@ -91,6 +103,11 @@ struct BeatDetector : Module {
 	void dataFromJson(json_t* root) override;
 
 private:
+	struct Swap {
+		std::unique_ptr<beat::Inference> next;  // nullptr: back to the ODF
+	};
+	std::atomic<Swap*> incoming{nullptr}, retired{nullptr};
+
 	dsp::ClockDivider configDivider, lightDivider;
 	dsp::SchmittTrigger tapIn, clockIn, resetIn, barResetIn;
 	dsp::BooleanTrigger tapButton, halfButton, doubleButton, barResetButton, resetButton;
