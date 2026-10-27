@@ -8,6 +8,7 @@ dependencies = ["numpy", "scipy", "soundfile", "mir_eval"]
 
 [project.optional-dependencies]
 plot = ["matplotlib"]
+train = ["torch"]
 
 [project.scripts]
 beatref = "beatref.__main__:main"

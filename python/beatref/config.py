@@ -16,6 +16,7 @@ class Config:
     odf: str = 'superflux'            # superflux | flux | complex | hfc
     fps: float = 100.0
     latency: float = 0.013            # ODF peak delay behind the true onset [s], calibrated with `eval`
+    model: str = ''                   # RTNeural JSON beat network; replaces the ODF activation (its latency is in the file)
 
     # activation normalisation
     norm_mean_tau: float = 1.0        # running mean [s]
@@ -45,6 +46,7 @@ class Config:
     phase_offset: float = 0.0         # degrees of a beat; positive fires earlier
     time_offset: float = 0.0          # seconds; positive fires earlier, to cancel downstream delay
     beats_per_bar: int = 4
+    auto_downbeat: bool = False       # bar 1 follows the downbeat activation (network) or the low band (ODF)
     ratio: float = 2.0                # Clock x/÷ output, in clocks per beat
 
     # seeding
@@ -61,5 +63,5 @@ class Config:
             name, value = pair.split('=', 1)
             if name not in types:
                 raise KeyError(f'unknown setting {name!r}; choose from {", ".join(types)}')
-            kw[name] = types[name](value)
+            kw[name] = value.lower() in ('1', 'true', 'yes', 'on') if types[name] is bool else types[name](value)
         return replace(self, **kw)

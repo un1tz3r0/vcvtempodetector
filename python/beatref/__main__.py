@@ -4,7 +4,7 @@ import numpy as np
 
 from .config import Config
 from .detector import detect
-from .evaluate import evaluate, load_audio, load_beats
+from .evaluate import evaluate, load_audio, load_beats, parse_fold
 from .synth import write_set
 
 
@@ -23,11 +23,21 @@ def main():
     p.add_argument('--annotations', help='directory of <stem>.beats files, if not beside the audio')
     p.add_argument('--json', help='write per-file and mean scores here')
     p.add_argument('--jobs', type=int, help='worker processes (default: one per CPU)')
+    p.add_argument('--fold', help="i/k: score only the files `train --fold i/k` held out")
 
     p = sub.add_parser('compare', help='check the C++ engine against the reference, beat for beat')
     p.add_argument('root')
     p.add_argument('--tolerance', type=float, default=1.0, help='max beat time difference [ms]')
     p.add_argument('--jobs', type=int)
+
+    p = sub.add_parser('train', help='train the neural beat and downbeat network (needs torch)')
+    p.add_argument('sources', nargs='+', metavar='ROOT[:ANNOTATIONS]')
+    p.add_argument('--out', required=True, help='RTNeural JSON model to write')
+    p.add_argument('--fold', help='i/k: hold out fold i of k (for cross-validation)')
+    p.add_argument('--cache', default='data/cache', help='feature cache directory')
+    p.add_argument('--hyper', action='append', default=[], metavar='NAME=VALUE', help='override a Hyper setting')
+    p.add_argument('--jobs', type=int)
+    p.add_argument('--threads', type=int, help='torch threads')
 
     p = sub.add_parser('synth', help='render the synthetic test set')
     p.add_argument('root')
@@ -48,7 +58,9 @@ def main():
         from .cpp import detect_cpp as run
     if a.cmd == 'track':
         r = run(*load_audio(a.audio), cfg)
-        lines = '\n'.join(f'{t:.3f}\t{(i - r.index[0]) % cfg.beats_per_bar + 1}' for t, i in zip(r.beats, r.index))
+        i = np.arange(len(r.beats))
+        pos = i - np.maximum.accumulate(np.where(r.bar, i, 0))  # beats since bar 1
+        lines = '\n'.join(f'{t:.3f}\t{p + 1}' for t, p in zip(r.beats, pos))  # can pass beats/bar when bar 1 moves later
         if a.out:
             open(a.out, 'w').write(lines + '\n')
         else:
@@ -56,7 +68,15 @@ def main():
         print(f'# {len(r.beats)} beats, median {np.median(r.bpm[r.lock]) if r.lock.any() else 0:.1f} BPM, '
               f'locked {r.lock.mean():.0%}')
     elif a.cmd == 'eval':
-        evaluate(a.root, cfg, a.annotations, a.json, a.jobs, a.engine)
+        evaluate(a.root, cfg, a.annotations, a.json, a.jobs, a.engine, parse_fold(a.fold))
+    elif a.cmd == 'train':
+        from .train import Hyper, train
+        h = Hyper()
+        for pair in a.hyper:
+            name, value = pair.split('=', 1)
+            setattr(h, name, type(getattr(h, name))(eval(value)) if isinstance(getattr(h, name), tuple)
+                    else type(getattr(h, name))(value))
+        train(a.sources, a.out, h, parse_fold(a.fold), a.cache, a.jobs, a.threads)
     elif a.cmd == 'compare':
         from .compare import compare
         raise SystemExit(0 if compare(a.root, cfg, a.jobs, a.tolerance) else 1)

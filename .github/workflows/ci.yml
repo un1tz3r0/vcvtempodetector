@@ -42,6 +42,7 @@ jobs:
       - run: beatref synth data/synth
       - run: beatref compare data/synth
       - run: beatref --set odf=complex compare data/synth
+      - run: beatref --set model=plugin/res/models/beat.json --set auto_downbeat=1 eval data/synth
 
   build:
     name: Build ${{ matrix.platform }}
