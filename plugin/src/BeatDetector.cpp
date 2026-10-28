@@ -464,7 +464,10 @@ struct BeatDetectorWidget : ModuleWidget {
 
 	void appendContextMenu(Menu* menu) override {
 		BeatDetector* m = getModule<BeatDetector>();
-		auto slider = [&](Menu* into, int param) { into->addChild(new ParamSlider(m->paramQuantities[param])); };
+		if (!m)
+			return;
+		// Submenus are built on hover, after this function returns, so capture m by value.
+		auto slider = [m](Menu* into, int param) { into->addChild(new ParamSlider(m->paramQuantities[param])); };
 
 		menu->addChild(new MenuSeparator);
 		menu->addChild(createSubmenuItem("Tempo range", "", [=](Menu* sub) {
