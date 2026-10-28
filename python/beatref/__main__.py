@@ -39,6 +39,17 @@ def main():
     p.add_argument('--jobs', type=int)
     p.add_argument('--threads', type=int, help='torch threads')
 
+    p = sub.add_parser('finetune', help='learning mode: adapt a model to audio with an aligned beat grid (needs torch)')
+    p.add_argument('base', help='RTNeural JSON model to start from')
+    p.add_argument('sources', nargs='+', metavar='ROOT[:ANNOTATIONS]')
+    p.add_argument('--out', required=True, help='adapted model to write')
+    p.add_argument('--replay', action='append', default=[], metavar='ROOT[:ANNOTATIONS]',
+                   help='base training data to mix in (repeatable; set its share with --tune replay=0.5)')
+    p.add_argument('--tune', action='append', default=[], metavar='NAME=VALUE', help='override a Tune setting')
+    p.add_argument('--cache', default='data/cache')
+    p.add_argument('--jobs', type=int)
+    p.add_argument('--threads', type=int)
+
     p = sub.add_parser('synth', help='render the synthetic test set')
     p.add_argument('root')
     p.add_argument('--count', type=int, default=24)
@@ -77,6 +88,13 @@ def main():
             setattr(h, name, type(getattr(h, name))(eval(value)) if isinstance(getattr(h, name), tuple)
                     else type(getattr(h, name))(value))
         train(a.sources, a.out, h, parse_fold(a.fold), a.cache, a.jobs, a.threads)
+    elif a.cmd == 'finetune':
+        from .finetune import Tune, finetune
+        t = Tune()
+        for pair in a.tune:
+            name, value = pair.split('=', 1)
+            setattr(t, name, type(getattr(t, name))(value))
+        finetune(a.base, a.sources, a.out, t, a.replay, a.cache, a.jobs, a.threads)
     elif a.cmd == 'compare':
         from .compare import compare
         raise SystemExit(0 if compare(a.root, cfg, a.jobs, a.tolerance) else 1)

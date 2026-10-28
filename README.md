@@ -10,7 +10,7 @@ and time offsets cancel any delay downstream.
 | 0 | Python reference tracker and evaluation harness ([`python/`](python/)) | done |
 | 1 | C++ DSP module ([`plugin/`](plugin/)): onset detection, online HMM tracker, flywheel oscillator, display | done |
 | 2 | Neural activations ([`python/`](python/#neural-activation-stage-2)): a causal TCN with our own weights, beat and downbeat, run through RTNeural on a worker thread; user-loadable models | done |
-| 3 | Learning mode: adapt the model to your material from audio plus a clock | planned |
+| 3 | Learning mode ([`python/`](python/#learning-mode-stage-3)): adapt the model to your material from audio plus a beat grid. `beatref finetune` and a Colab notebook are done (4 minutes of an unheard style brings a model level with one trained on all of it); recording from the Clock input and a model library in the module are next, then fine-tuning inside Rack | in progress |
 
 Every stage keeps the same tracker and oscillator back end and changes only what feeds it.
 

@@ -25,6 +25,7 @@ from .config import Config
 from .evaluate import fold_of, load_audio, pairs, score_file
 from .features import Features, Frontend, transform
 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 STRETCH = (0.8, 0.9, 1.0, 1.12, 1.25)  # hop scale factors: < 1 slows the music down
 
 
@@ -147,7 +148,7 @@ class Net(nn.Module):
 
 def export(net, h, fe, path, latency, meta=None):
     """Write RTNeural JSON (Keras layout), with the input standardisation folded into the first layer."""
-    t = lambda a: a.detach().double().numpy()
+    t = lambda a: a.detach().cpu().double().numpy()
     W, b = t(net.inp.weight) / t(net.std), t(net.inp.bias)
     b = b - W @ t(net.mean)
     layers = [dict(type='dense', activation='elu', shape=[None, None, h.width], weights=[W.T.tolist(), b.tolist()])]
@@ -191,11 +192,12 @@ def train(sources, out, h=Hyper(), fold=None, cache='data/cache', jobs=None, thr
     # start from the base rates: from zero logits, training sits on a plateau for many epochs
     prior = np.array([np.mean(np.concatenate([it[k] for it in tr.items[::7]])) for k in (1, 2)])
     net.out.bias.data.copy_(torch.from_numpy(np.log(prior / (1 - prior))).float())
+    net.to(DEVICE)
     opt = torch.optim.AdamW(net.parameters(), h.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, h.lr, total_steps=h.epochs * h.steps, pct_start=0.15)
     loss_fn = nn.BCEWithLogitsLoss(reduction='none')
     vrng = np.random.default_rng(1234)
-    vbatches = [list(va.batch(vrng, h, fe)) for _ in range(max(4, len(va.items) // (h.batch * 2)))]
+    vbatches = [[a.to(DEVICE) for a in va.batch(vrng, h, fe)] for _ in range(max(4, len(va.items) // (h.batch * 2)))]
     best = np.inf
     print(f'{sum(p.numel() for p in net.parameters())} parameters', flush=True)
 
@@ -203,7 +205,7 @@ def train(sources, out, h=Hyper(), fold=None, cache='data/cache', jobs=None, thr
         net.train()
         t0, total = time.time(), 0.0
         for _ in range(h.steps):
-            x, y, m = tr.batch(rng, h, fe)
+            x, y, m = (a.to(DEVICE) for a in tr.batch(rng, h, fe))
             loss = (loss_fn(net(x), y) * m).sum() / m.sum()
             opt.zero_grad()
             loss.backward()
@@ -228,7 +230,11 @@ def calibrate(path, files, jobs=None):
     spec = json.loads(Path(path).read_text())
     with ProcessPoolExecutor(jobs) as pool:
         rows = list(pool.map(score_file, repeat(Config(model=str(path))), repeat('py'), *zip(*files)))
-    offset = float(np.nanmean([r['offset_ms'] for r in rows])) / 1000
+    offsets = [r['offset_ms'] for r in rows if np.isfinite(r['offset_ms'])]
+    if not offsets:
+        print('no tracked beat matched an annotation; latency left as it was', flush=True)
+        return
+    offset = float(np.mean(offsets)) / 1000
     spec['beatref']['latency'] = max(0.0, spec['beatref']['latency'] + offset)  # early beats: less compensation
     Path(path).write_text(json.dumps(spec, separators=(',', ':')))
     print(f'latency {spec["beatref"]["latency"] * 1000:.1f} ms (beats were {offset * 1000:+.1f} ms off)', flush=True)
