@@ -16,6 +16,7 @@ beatref compare data/synth                                   # the module's C++ 
 beatref --engine cpp eval data/synth                         # track or eval through the C++ engine
 beatref --set model=../plugin/res/models/beat.json eval ...  # the neural activation instead of the ODF
 beatref train data/ballroom:data/BallroomAnnotations data/gtzan:data/gtzan-beats --out beat.json
+beatref finetune ../plugin/res/models/beat.json recordings/ --out mine.json  # learning mode
 beatref --set model=f0.json eval data/ballroom --annotations data/BallroomAnnotations --fold 0/4
 ```
 
@@ -83,6 +84,80 @@ in numpy, and the module runs the same file through RTNeural.
   when another position beats the current one by 25%. Without a downbeat output, the ODF's low
   band is used instead. Bar F is scored against the annotated meter, as if Beats/Bar were set
   to match.
+
+## Learning mode (Stage 3)
+
+`beatref finetune BASE.json SOURCES... --out ADAPTED.json` adapts a model to your own material:
+audio with a beat grid aligned to it, in the same `time [beat-in-bar]` layout as the datasets.
+The module's *Learning mode → Record* (from 2.2.0) writes exactly that from the Clock input, and the
+[Colab notebook](notebooks/learning_mode.ipynb)
+([open in Colab](https://colab.research.google.com/github/un1tz3r0/vcvtempodetector/blob/main/python/notebooks/learning_mode.ipynb))
+runs it on recordings in Google Drive.
+
+- **What is adapted.** The top `layers` layers (default 3: the output layer and the top two
+  convolutions, 25k of 110k parameters; 0 adapts all of them), with an L2-SP penalty
+  (`l2sp`) that pulls the weights back towards the base model rather than towards zero. The
+  same stretch and gain augmentation as training; `--replay ROOT[:ANN]` with
+  `--tune replay=0.5` mixes the base model's training data into half the batches.
+- **Validation.** The last 20% of every recording (`holdout`) is never trained on. The base
+  model is scored on it first, and the adapted model is written only from an epoch that beats
+  it. Its latency is then recalibrated on the recordings.
+- **Suggested settings.** The tempo range (5th to 95th percentile, ±5%) and the most common
+  meter of the recordings go into the model's `beatref.suggest` block; the module offers to
+  apply them. `beatref.adapted` records the base model and the amount of material.
+- **GPU.** `train` and `finetune` use CUDA when torch finds it.
+
+**Results**, 2026-10-28: leave one Ballroom style out. A base model is trained with the Stage 2
+recipe on GTZAN and Ballroom without that style. The style's clips are split in two by a hash of
+their name: the adaptation pool and the test half. The base model is then adapted with the
+defaults on the first k clips of the pool (k = 10 is about 4 minutes) and scored on the test
+half with automatic downbeat on. Adapted models use their suggested settings. *GTZAN F* scores
+every tenth GTZAN clip with default settings, which shows how much the model forgot.
+
+| Waltz (60 test clips) | F | CMLt | AMLt | Bar F | GTZAN F |
+| --- | --- | --- | --- | --- | --- |
+| Base (never heard a waltz) | 0.699 | 0.542 | 0.717 | 0.468 | 0.836 |
+| Base + suggested settings | 0.707 | 0.563 | 0.723 | 0.470 | |
+| Adapted, 5 clips (2 min) | 0.722 | 0.692 | 0.760 | 0.538 | 0.834 |
+| **Adapted, 10 clips (4 min)** | **0.777** | **0.754** | **0.806** | 0.612 | 0.839 |
+| Adapted, all 50 clips (21 min) | 0.777 | 0.743 | 0.790 | 0.622 | 0.831 |
+| Shipped model (trained on every waltz, test half included) | 0.775 | 0.731 | 0.794 | 0.650 | |
+
+| Quickstep (41 test clips) | F | CMLt | AMLt | Bar F | GTZAN F |
+| --- | --- | --- | --- | --- | --- |
+| Base (never heard a quickstep) | 0.643 | 0.096 | 0.774 | 0.243 | 0.841 |
+| Base + suggested settings | 0.771 | 0.430 | 0.742 | 0.379 | |
+| Adapted, 10 clips, default settings | 0.635 | 0.157 | 0.771 | 0.229 | |
+| Adapted, 5 clips (2 min) | 0.917 | 0.799 | 0.879 | 0.507 | 0.808 |
+| **Adapted, 10 clips (4 min)** | **0.909** | **0.791** | **0.875** | 0.632 | 0.811 |
+| Adapted, all 41 clips (17 min) | 0.921 | 0.828 | 0.861 | 0.626 | 0.807 |
+| Shipped model (trained on every quickstep) | 0.622 | 0.123 | 0.769 | 0.295 | |
+
+The two styles fail in different ways, and learning mode fixes both. The waltz problem is in
+the network: the settings change little, and four minutes of material bring it level with a
+model that trained on every waltz. Quickstep sits at 200 BPM and above, outside the default
+preferred range, so every model tracks it at half tempo (CMLt about 0.1), even one that trained
+on it. The suggested tempo range fixes most of the level, and adaptation then fixes the phase
+and the bars. Past about 4 minutes, more material adds little.
+
+Variations on the 10-clip run (F / bar F / GTZAN F; defaults are `layers=3`, `l2sp=1e-4`):
+
+| Variation | Waltz | Quickstep |
+| --- | --- | --- |
+| Defaults | 0.777 / 0.612 / 0.839 | 0.909 / 0.632 / 0.811 |
+| `l2sp=0` | 0.773 / 0.605 / 0.828 | 0.913 / 0.642 / 0.792 |
+| `l2sp=1e-3` | 0.758 / 0.548 / 0.840 | 0.891 / 0.553 / 0.825 |
+| `layers=1` (output layer only) | 0.736 / 0.528 / 0.840 | 0.847 / 0.436 / 0.833 |
+| `layers=0` (all 110k parameters) | 0.744 / 0.615 / 0.817 | 0.935 / 0.726 / 0.682 |
+| `--replay` base data, `replay=0.5` | 0.752 / 0.546 / 0.842 | 0.885 / 0.560 / 0.831 |
+
+Adapting everything fits a style best but forgets the most (GTZAN F drops by 0.16 after
+Quickstep), and adapting only the output layer is too weak. A stronger pull or replay trades
+some of the gain for less forgetting. An adapted model is meant for the material it was adapted
+to, and the patch keeps the built-in model one click away. An earlier test that left GTZAN's
+jazz out showed little to gain: the shipped model, which trained on the test clips, scores only
+0.017 F above a model that never heard jazz, so the genre's errors are not ones more jazz data
+fixes.
 
 ## Results
 
