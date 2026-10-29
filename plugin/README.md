@@ -115,6 +115,9 @@ Results (2026-10-27, neural):
 - **Live.** In Rack 2.6.6 the module locks to and holds a 120 BPM noise-burst pattern. These all
   work while it runs: switching activation, a user model restored from the patch, falling back
   from a broken model file, and a pre-2.1 patch (which keeps the ODF).
+- **Context menu** (2.1.1). Hovering each custom item opens its submenu, nested ones included.
+  Before 2.1.1 the submenu builders reached the module through a reference to a local of
+  `appendContextMenu`, which dangles once the menu is shown, so hovering Tempo range crashed Rack.
 
 Results (2026-10-26, ODF):
 
