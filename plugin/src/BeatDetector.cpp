@@ -2,6 +2,7 @@
 
 #include <osdialog.h>
 
+#include <ctime>
 #include <fstream>
 #include <sstream>
 
@@ -82,6 +83,8 @@ BeatDetector::BeatDetector() {
 BeatDetector::~BeatDetector() {
 	delete incoming.exchange(nullptr);
 	delete retired.exchange(nullptr);
+	delete recorder.exchange(nullptr);
+	delete recorderRetired.exchange(nullptr);
 }
 
 static std::string readFile(const std::string& path) {
@@ -114,6 +117,78 @@ bool BeatDetector::applyModel(double sampleRate) {
 
 void BeatDetector::collect() {
 	delete retired.exchange(nullptr);
+	delete recorderRetired.exchange(nullptr);  // finishes the WAV and writes the .beats file
+}
+
+std::string BeatDetector::userDir(const std::string& sub) {
+	std::string dir = system::join(asset::user("BeatDetector"), sub);
+	system::createDirectories(dir);
+	return dir;
+}
+
+void BeatDetector::startRecording() {
+	if (recording() || !inputs[CLOCK_INPUT].isConnected())
+		return;
+	char stamp[32];
+	std::time_t now = std::time(nullptr);
+	std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
+	std::unique_ptr<beat::Recorder> r(new beat::Recorder(system::join(userDir("recordings"), stamp),
+		APP->engine->getSampleRate(), int(params[BEATS_PER_BAR_PARAM].getValue())));
+	if (!r->ok()) {
+		WARN("Beat Detector: can't write %s.wav", r->path().c_str());
+		return;
+	}
+	recorderStop = false;
+	recorder.store(r.release(), std::memory_order_release);
+}
+
+void BeatDetector::stopRecording() {
+	recorderStop = true;
+}
+
+bool BeatDetector::setModel(const std::string& json, const std::string& name) {
+	std::string oldJson = modelJson, oldName = modelName;
+	bool wasNeural = neural;
+	modelJson = json;
+	modelName = name;
+	neural = true;
+	if (applyModel()) {
+		readSuggestion();
+		return true;
+	}
+	modelJson = oldJson;
+	modelName = oldName;
+	neural = wasNeural;
+	return false;
+}
+
+void BeatDetector::readSuggestion() {
+	suggestMin = suggestMax = suggestPrefMin = suggestPrefMax = 0;
+	suggestBeatsPerBar = 0;
+	json_t* root = modelJson.empty() ? nullptr : json_loads(modelJson.c_str(), 0, nullptr);
+	json_t* s = json_object_get(json_object_get(root, "beatref"), "suggest");
+	if (s) {
+		suggestMin = json_number_value(json_object_get(s, "min_bpm"));
+		suggestMax = json_number_value(json_object_get(s, "max_bpm"));
+		suggestPrefMin = json_number_value(json_object_get(s, "pref_min_bpm"));
+		suggestPrefMax = json_number_value(json_object_get(s, "pref_max_bpm"));
+		suggestBeatsPerBar = json_integer_value(json_object_get(s, "beats_per_bar"));
+	}
+	if (root)
+		json_decref(root);
+}
+
+void BeatDetector::applySuggestion() {
+	if (suggestMax > 0) {
+		paramQuantities[MIN_BPM_PARAM]->setValue(suggestMin);
+		paramQuantities[MAX_BPM_PARAM]->setValue(suggestMax);
+	}
+	if (suggestPrefMax > 0) {
+		paramQuantities[PREF_MIN_BPM_PARAM]->setValue(suggestPrefMin);
+		paramQuantities[PREF_MAX_BPM_PARAM]->setValue(suggestPrefMax);
+	}
+	if (suggestBeatsPerBar > 0)
+		paramQuantities[BEATS_PER_BAR_PARAM]->setValue(suggestBeatsPerBar);
 }
 
 beat::Config BeatDetector::settings() {
@@ -190,7 +265,8 @@ void BeatDetector::process(const ProcessArgs& args) {
 		engine->scaleTempo(0.5);
 	if (doubleButton.process(params[DOUBLE_PARAM].getValue() > 0))
 		engine->scaleTempo(2);
-	if (clockIn.process(inputs[CLOCK_INPUT].getVoltage(), 0.1f, 1.f) && clockCount++ % std::max(clockPpqn, 1) == 0)
+	bool clockBeat = clockIn.process(inputs[CLOCK_INPUT].getVoltage(), 0.1f, 1.f) && clockCount++ % std::max(clockPpqn, 1) == 0;
+	if (clockBeat)
 		engine->clock();
 	engine->setClockConnected(inputs[CLOCK_INPUT].isConnected());
 	engine->setHold(inputs[HOLD_INPUT].getVoltage() >= 1.f);
@@ -199,6 +275,17 @@ void BeatDetector::process(const ProcessArgs& args) {
 	float l = inputs[AUDIO_L_INPUT].getVoltageSum(), r = inputs[AUDIO_R_INPUT].getVoltageSum();
 	bool hasL = inputs[AUDIO_L_INPUT].isConnected(), hasR = inputs[AUDIO_R_INPUT].isConnected();
 	float x = hasL && hasR ? (l + r) / 2 : hasL ? l : r;
+	if (beat::Recorder* rec = recorder.load(std::memory_order_acquire)) {
+		if (barReset)
+			rec->barReset();
+		if (clockBeat)
+			rec->beat();
+		rec->push(x / 5.f);
+		if ((recorderStop || !inputs[CLOCK_INPUT].isConnected()) && !recorderRetired.load(std::memory_order_acquire)) {
+			recorderRetired.store(recorder.exchange(nullptr), std::memory_order_release);
+			recorderStop = false;
+		}
+	}
 	beat::Output o = engine->process(x / 5.f);
 	if (engine->frameReady() && !frames.full())
 		frames.push(engine->frame());
@@ -236,6 +323,7 @@ void BeatDetector::process(const ProcessArgs& args) {
 }
 
 void BeatDetector::onSampleRateChange(const SampleRateChangeEvent& e) {
+	stopRecording();  // the WAV has one rate
 	engine.reset(new beat::Engine(settings(), e.sampleRate));
 	frames.clear();
 	applyModel(e.sampleRate);
@@ -254,6 +342,7 @@ void BeatDetector::onReset(const ResetEvent& e) {
 	neural = true;
 	modelJson.clear();
 	modelName.clear();
+	readSuggestion();
 	engine.reset(new beat::Engine(settings(), APP->engine->getSampleRate()));
 	frames.clear();
 	applyModel();
@@ -302,6 +391,7 @@ void BeatDetector::dataFromJson(json_t* root) {
 		modelName.clear();
 		applyModel();
 	}
+	readSuggestion();
 	pendingReset = true;  // picks up the loaded warm start
 }
 
@@ -443,22 +533,68 @@ struct BeatDetectorWidget : ModuleWidget {
 		ModuleWidget::step();
 	}
 
-	static void loadModel(BeatDetector* m) {
+	static std::string chooseFile(osdialog_file_action action, const std::string& dir, const std::string& name) {
 		osdialog_filters* filters = osdialog_filters_parse("RTNeural JSON:json");
-		char* path = osdialog_file(OSDIALOG_OPEN, nullptr, nullptr, filters);
+		char* path = osdialog_file(action, dir.c_str(), name.c_str(), filters);
 		osdialog_filters_free(filters);
-		if (!path)
-			return;
-		std::string oldJson = m->modelJson, oldName = m->modelName;
-		bool wasNeural = m->neural;
-		m->modelJson = readFile(path);
-		m->modelName = system::getFilename(path);
-		m->neural = true;
+		std::string out = path ? path : "";
 		std::free(path);
-		if (!m->applyModel()) {
-			m->modelJson = oldJson;
-			m->modelName = oldName;
-			m->neural = wasNeural;
+		return out;
+	}
+
+	static void loadModel(BeatDetector* m, std::string path) {
+		if (!path.empty())
+			m->setModel(readFile(path), system::getFilename(path));
+	}
+
+	static void saveModel(BeatDetector* m) {
+		std::string name = m->modelJson.empty() ? "built-in.json" : m->modelName;
+		std::string path = chooseFile(OSDIALOG_SAVE, BeatDetector::userDir("models"), name);
+		if (path.empty())
+			return;
+		if (system::getExtension(path) != ".json")
+			path += ".json";
+		std::ofstream(path) << (m->modelJson.empty() ? readFile(asset::plugin(pluginInstance, "res/models/beat.json")) : m->modelJson);
+	}
+
+	static void learningMenu(BeatDetector* m, Menu* sub) {
+		beat::Recorder* rec = m->recording();
+		bool clock = m->inputs[BeatDetector::CLOCK_INPUT].isConnected();
+		sub->addChild(createMenuLabel("Record audio with a trusted beat grid"));
+		sub->addChild(createMenuLabel("on the Clock input (Bar reset marks bar 1)"));
+		sub->addChild(createCheckMenuItem(rec ? "Recording (click to stop)" : "Record", "",
+			[=]() { return rec != nullptr; },
+			[=]() { rec ? m->stopRecording() : m->startRecording(); }, !rec && !clock));
+		if (rec)
+			sub->addChild(createMenuLabel(string::f("%d:%02d, %d beats%s", int(rec->seconds()) / 60, int(rec->seconds()) % 60,
+				rec->beats(), rec->dropped() ? ", audio dropped" : "")));
+		else if (!clock)
+			sub->addChild(createMenuLabel("Patch the Clock input to record"));
+		sub->addChild(createMenuItem("Open recordings folder", "", [=]() { system::openDirectory(BeatDetector::userDir("recordings")); }));
+		sub->addChild(createMenuLabel("Adapt a model to them with beatref finetune"));
+
+		sub->addChild(new MenuSeparator);
+		sub->addChild(createSubmenuItem("Model library", "", [=](Menu* lib) {
+			std::string dir = BeatDetector::userDir("models");
+			std::vector<std::string> files;
+			for (const std::string& f : system::getEntries(dir))
+				if (system::getExtension(f) == ".json")
+					files.push_back(f);
+			std::sort(files.begin(), files.end());
+			for (const std::string& f : files)
+				lib->addChild(createCheckMenuItem(system::getStem(f), "",
+					[=]() { return m->modelName == system::getFilename(f); }, [=]() { loadModel(m, f); }));
+			if (files.empty())
+				lib->addChild(createMenuLabel("Empty"));
+			lib->addChild(new MenuSeparator);
+			lib->addChild(createMenuItem("Save the current model to the library…", "", [=]() { saveModel(m); }));
+			lib->addChild(createMenuItem("Open library folder", "", [=]() { system::openDirectory(dir); }));
+		}));
+		if (m->suggestPrefMax > 0 || m->suggestBeatsPerBar > 0) {
+			std::string what = m->suggestPrefMax > 0 ? string::f("%.0f–%.0f BPM", m->suggestPrefMin, m->suggestPrefMax) : "";
+			if (m->suggestBeatsPerBar > 0)
+				what += (what.empty() ? "" : ", ") + string::f("%d beats/bar", m->suggestBeatsPerBar);
+			sub->addChild(createMenuItem("Apply the model's suggested settings", what, [=]() { m->applySuggestion(); }));
 		}
 	}
 
@@ -489,16 +625,12 @@ struct BeatDetectorWidget : ModuleWidget {
 			}));
 			sub->addChild(new MenuSeparator);
 			sub->addChild(createMenuLabel("Model: " + (m->modelJson.empty() ? std::string("built-in") : m->modelName)));
-			sub->addChild(createMenuItem("Load RTNeural JSON…", "", [=]() { loadModel(m); }));
-			sub->addChild(createMenuItem("Use the built-in model", "", [=]() {
-				m->modelJson.clear();
-				m->modelName.clear();
-				m->neural = true;
-				m->applyModel();
-			}, m->modelJson.empty()));
+			sub->addChild(createMenuItem("Load RTNeural JSON…", "", [=]() { loadModel(m, chooseFile(OSDIALOG_OPEN, "", "")); }));
+			sub->addChild(createMenuItem("Use the built-in model", "", [=]() { m->setModel("", ""); }, m->modelJson.empty()));
 			if (!m->modelError.empty())
 				sub->addChild(createMenuLabel(m->modelError));
 		}));
+		menu->addChild(createSubmenuItem("Learning mode", m->recording() ? "Recording" : "", [=](Menu* sub) { learningMenu(m, sub); }));
 		menu->addChild(createIndexPtrSubmenuItem("Onset detection", {"SuperFlux", "Spectral flux", "Complex domain", "HFC"}, &m->odf));
 		menu->addChild(createIndexPtrSubmenuItem("BPM CV scaling",
 			{"V/oct, 0 V = 120 BPM", "Linear, 10 V = 300 BPM", "Linear, 1 V = 100 BPM"}, &m->bpmScale));

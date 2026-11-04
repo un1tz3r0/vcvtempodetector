@@ -89,7 +89,7 @@ in numpy, and the module runs the same file through RTNeural.
 
 `beatref finetune BASE.json SOURCES... --out ADAPTED.json` adapts a model to your own material:
 audio with a beat grid aligned to it, in the same `time [beat-in-bar]` layout as the datasets.
-The module's *Learning mode → Record* (from 2.2.0) writes exactly that from the Clock input, and the
+The module's *Learning mode → Record* writes exactly that from the Clock input, and the
 [Colab notebook](notebooks/learning_mode.ipynb)
 ([open in Colab](https://colab.research.google.com/github/un1tz3r0/vcvtempodetector/blob/main/python/notebooks/learning_mode.ipynb))
 runs it on recordings in Google Drive.

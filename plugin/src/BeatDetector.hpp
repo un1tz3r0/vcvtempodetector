@@ -2,6 +2,7 @@
 #include <memory>
 
 #include "dsp/Engine.hpp"
+#include "dsp/Recorder.hpp"
 #include "plugin.hpp"
 
 struct BeatDetector : Module {
@@ -81,6 +82,18 @@ struct BeatDetector : Module {
 	bool neural = true;
 	std::string modelJson, modelName;  // empty: the built-in model
 	std::string modelError;            // why the last model didn't load, for the menu
+	// settings the model suggests for the material it was adapted to (`beatref finetune`); 0 = none
+	float suggestMin = 0, suggestMax = 0, suggestPrefMin = 0, suggestPrefMax = 0;
+	int suggestBeatsPerBar = 0;
+
+	// learning mode: Record writes the audio and the Clock input's grid (dsp/Recorder.hpp)
+	static std::string userDir(const std::string& sub);
+	void startRecording();
+	void stopRecording();
+	beat::Recorder* recording() const { return recorder.load(std::memory_order_acquire); }
+	/** Use a model's JSON (empty: the built-in model); false, with nothing changed, if it can't be used. */
+	bool setModel(const std::string& json, const std::string& name);
+	void applySuggestion();
 
 	std::unique_ptr<beat::Engine> engine;
 	dsp::RingBuffer<beat::Frame, 512> frames;  // audio thread -> display
@@ -107,6 +120,11 @@ private:
 		std::unique_ptr<beat::Inference> next;  // nullptr: back to the ODF
 	};
 	std::atomic<Swap*> incoming{nullptr}, retired{nullptr};
+	// The UI thread creates a recorder and hands it over; the audio thread drops it into
+	// recorderRetired when asked to stop, and collect() finishes it.
+	std::atomic<beat::Recorder*> recorder{nullptr}, recorderRetired{nullptr};
+	std::atomic<bool> recorderStop{false};
+	void readSuggestion();
 
 	dsp::ClockDivider configDivider, lightDivider;
 	dsp::SchmittTrigger tapIn, clockIn, resetIn, barResetIn;

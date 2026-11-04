@@ -60,9 +60,29 @@ and shows the error in the menu. **Use the built-in model** goes back to the bui
 
 **Onset detection function** is the Stage 1 activation. Patches saved before 2.1 keep it.
 
+## Learning mode
+
+Adapts the network to your own material (Stage 3). Patch a trusted beat clock into **Clock**
+(a sequencer or a clock module driving the music you feed in, with *Clock input → Pulses per
+beat* set to match) and choose **Learning mode → Record**. The module writes the audio it hears
+and the clock's beats to `<Rack user folder>/BeatDetector/recordings/<date>-<time>.wav` and
+`.beats`, until you stop it, unpatch the clock or the sample rate changes. Pulses on **Bar reset**
+mark bar 1: the nearest clock beat becomes bar 1 and the others are numbered with Beats/bar;
+without a bar reset, only beat times are written. The audio thread only copies into a lock-free
+ring (6 s deep); a worker thread writes the file, and the grid stays aligned with the audio that
+was kept even if the disk stalls.
+
+Adapt a model to the recordings with `beatref finetune` or the
+[Colab notebook](../python/notebooks/learning_mode.ipynb) (see
+[`python/`](../python/#learning-mode-stage-3)), then load it. **Model library** lists the
+`.json` models in `<Rack user folder>/BeatDetector/models`, loads one with a click and saves the
+current model there. A model adapted by `beatref finetune` carries the tempo range and meter of
+its recordings, and **Apply the model's suggested settings** sets the tempo ranges and Beats/bar
+to them.
+
 ## Context menu
 
-Beat activation (above), tempo range (60–200 BPM) and preferred range (90–180), onset detection function (SuperFlux,
+Beat activation and learning mode (above), tempo range (60–200 BPM) and preferred range (90–180), onset detection function (SuperFlux,
 spectral flux, complex domain, HFC), BPM CV scaling (V/oct with 0 V = 120 BPM, 10 V = 300 BPM,
 or 1 V = 100 BPM), warm start (off, a set tempo, or seeded by the first two Clock beats), what
 to do on losing the beat (coast, stop after N bars, keep following) and the re-lock glide, lock
@@ -80,7 +100,7 @@ ODFs), `BeatTracker` (the online HMM), `Oscillator` (the flywheel) and `Engine` 
 normalisation, confidence and lock, the audio-rate oscillator, bars, the clock divider, and the
 manual controls), plus the neural path: `Features` (the network's filterbank front end),
 `Network` (an RTNeural model and its `beatref` metadata) and `Inference` (the worker thread and
-its rings). `BeatDetector.cpp` is the module and panel; `Waterfall.hpp` is the display. RTNeural
+its rings), and `Recorder` (learning mode's WAV and grid writer). `BeatDetector.cpp` is the module and panel; `Waterfall.hpp` is the display. RTNeural
 and nlohmann/json are vendored header-only in `vendor/` and run in double precision with the
 plain C++ backend, so they build on every Rack platform, ARM included, and match the Python
 reference exactly. A new model is built on the UI thread and handed to the audio thread through
