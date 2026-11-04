@@ -72,11 +72,27 @@ without a bar reset, only beat times are written. The audio thread only copies i
 ring (6 s deep); a worker thread writes the file, and the grid stays aligned with the audio that
 was kept even if the disk stalls.
 
-Adapt a model to the recordings with `beatref finetune` or the
-[Colab notebook](../python/notebooks/learning_mode.ipynb) (see
-[`python/`](../python/#learning-mode-stage-3)), then load it. **Model library** lists the
+**Adapt the model to the recordings** fine-tunes the current model on every recording that has
+a `.beats` file, on a background thread, with the recipe of `beatref finetune` (see
+[`python/`](../python/#learning-mode-stage-3)): the top 3 layers adapt, pulled towards the base
+weights, and the last 20% of each recording is held back. The menu shows the epoch and the
+held-back loss, and the run can be cancelled. If an epoch beats the base model on the held-back
+audio, the result is saved to the model library as `adapted-<date>-<time>.json` and loaded;
+otherwise the model is left alone. About 4 minutes of audio takes about 3 minutes on one core.
+The same trainer runs outside Rack: `make finetune` builds `build/finetune`, and
+`build/finetune BASE.json OUT.json DIR_OR_STEM... [--set epochs=12 ...]` takes any
+`Tune` field from `src/dsp/Trainer.hpp`. It differs from the Python in small ways that keep a
+step cheap: the frozen layers are computed once per recording and stretch factor (so one gain
+per stretch rather than per crop, and dropout 0.3 above them), crops start on a 2 s grid, and the
+latency is kept rather than recalibrated. On the Ballroom leave-one-style-out test below it lands
+within the seed spread of the Python: Quickstep F 0.897 (Python 0.909), Waltz F 0.757 to 0.770
+(Python 0.764 to 0.777), and GTZAN F 0.812 after adapting (0.811), so it forgets no more.
+
+Or adapt with `beatref finetune` or the
+[Colab notebook](../python/notebooks/learning_mode.ipynb) for the replay option and a GPU, then
+load the result. **Model library** lists the
 `.json` models in `<Rack user folder>/BeatDetector/models`, loads one with a click and saves the
-current model there. A model adapted by `beatref finetune` carries the tempo range and meter of
+current model there. An adapted model carries the tempo range and meter of
 its recordings, and **Apply the model's suggested settings** sets the tempo ranges and Beats/bar
 to them.
 
@@ -100,7 +116,7 @@ ODFs), `BeatTracker` (the online HMM), `Oscillator` (the flywheel) and `Engine` 
 normalisation, confidence and lock, the audio-rate oscillator, bars, the clock divider, and the
 manual controls), plus the neural path: `Features` (the network's filterbank front end),
 `Network` (an RTNeural model and its `beatref` metadata) and `Inference` (the worker thread and
-its rings), and `Recorder` (learning mode's WAV and grid writer). `BeatDetector.cpp` is the module and panel; `Waterfall.hpp` is the display. RTNeural
+its rings), `Recorder` (learning mode's WAV and grid writer) and `Trainer` (its fine-tuning, forward and backward passes in plain C++). `BeatDetector.cpp` is the module and panel; `Waterfall.hpp` is the display. RTNeural
 and nlohmann/json are vendored header-only in `vendor/` and run in double precision with the
 plain C++ backend, so they build on every Rack platform, ARM included, and match the Python
 reference exactly. A new model is built on the UI thread and handed to the audio thread through

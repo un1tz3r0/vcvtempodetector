@@ -5,7 +5,7 @@ SOURCES += $(wildcard src/*.cpp src/dsp/*.cpp)
 DISTRIBUTABLES += res
 
 # The offline driver for python/beatref (`beatref compare`, `--engine cpp`) needs no Rack SDK.
-ifneq ($(MAKECMDGOALS),beattrack)
+ifeq ($(filter beattrack finetune,$(MAKECMDGOALS)),)
 include $(RACK_DIR)/plugin.mk
 CXXFLAGS := $(filter-out -std=c++11,$(CXXFLAGS)) -std=c++17
 # Self-contained DLL: don't depend on Rack shipping a matching libgcc_s_seh / libwinpthread.
@@ -20,3 +20,10 @@ build/beattrack: tools/beattrack.cpp $(wildcard src/dsp/*.cpp src/dsp/*.hpp)
 
 beattrack: build/beattrack
 .PHONY: beattrack
+
+build/finetune: tools/finetune.cpp $(wildcard src/dsp/*.cpp src/dsp/*.hpp)
+	@mkdir -p build
+	$(CXX) -O3 -std=c++17 -Wall -isystem vendor/RTNeural -o $@ tools/finetune.cpp src/dsp/Trainer.cpp src/dsp/Features.cpp -lpthread
+
+finetune: build/finetune
+.PHONY: finetune

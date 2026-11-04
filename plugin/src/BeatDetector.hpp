@@ -1,8 +1,11 @@
 #pragma once
 #include <memory>
+#include <mutex>
+#include <thread>
 
 #include "dsp/Engine.hpp"
 #include "dsp/Recorder.hpp"
+#include "dsp/Trainer.hpp"
 #include "plugin.hpp"
 
 struct BeatDetector : Module {
@@ -91,6 +94,15 @@ struct BeatDetector : Module {
 	void startRecording();
 	void stopRecording();
 	beat::Recorder* recording() const { return recorder.load(std::memory_order_acquire); }
+	/** Fine-tune the current model on every recording, on a background thread (dsp/Trainer.hpp);
+	the result is saved to the library and loaded by pollAdapting(). */
+	void startAdapting();
+	void cancelAdapting() { adaptCancel = true; }
+	bool adapting() const { return adaptThread.joinable(); }
+	/** On the UI thread: take a finished result. */
+	void pollAdapting();
+	beat::Trainer::Progress adaptProgress();
+	std::string adaptStatus;  // the last run's outcome, for the menu
 	/** Use a model's JSON (empty: the built-in model); false, with nothing changed, if it can't be used. */
 	bool setModel(const std::string& json, const std::string& name);
 	void applySuggestion();
@@ -124,6 +136,11 @@ private:
 	// recorderRetired when asked to stop, and collect() finishes it.
 	std::atomic<beat::Recorder*> recorder{nullptr}, recorderRetired{nullptr};
 	std::atomic<bool> recorderStop{false};
+	std::thread adaptThread;
+	std::atomic<bool> adaptCancel{false}, adaptDone{false};
+	std::mutex adaptMutex;  // guards the three below
+	beat::Trainer::Progress adaptProg;
+	std::string adaptResult, adaptError;
 	void readSuggestion();
 
 	dsp::ClockDivider configDivider, lightDivider;

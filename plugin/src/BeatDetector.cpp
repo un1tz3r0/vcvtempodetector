@@ -85,6 +85,9 @@ BeatDetector::~BeatDetector() {
 	delete retired.exchange(nullptr);
 	delete recorder.exchange(nullptr);
 	delete recorderRetired.exchange(nullptr);
+	adaptCancel = true;
+	if (adaptThread.joinable())
+		adaptThread.join();
 }
 
 static std::string readFile(const std::string& path) {
@@ -144,6 +147,83 @@ void BeatDetector::startRecording() {
 
 void BeatDetector::stopRecording() {
 	recorderStop = true;
+}
+
+static std::vector<std::string> recordingStems() {
+	std::vector<std::string> stems;
+	for (const std::string& f : system::getEntries(BeatDetector::userDir("recordings")))
+		if (system::getExtension(f) == ".wav") {
+			std::string stem = f.substr(0, f.size() - 4);
+			if (system::isFile(stem + ".beats"))
+				stems.push_back(stem);
+		}
+	std::sort(stems.begin(), stems.end());
+	return stems;
+}
+
+void BeatDetector::startAdapting() {
+	if (adapting() || recording())
+		return;
+	std::vector<std::string> stems = recordingStems();
+	std::string base = modelJson.empty() ? readFile(asset::plugin(pluginInstance, "res/models/beat.json")) : modelJson;
+	std::string baseName = modelJson.empty() ? "built-in model" : modelName;
+	adaptCancel = false;
+	adaptDone = false;
+	adaptStatus.clear();
+	adaptProg = beat::Trainer::Progress();
+	adaptProg.stage = "Starting";
+	adaptThread = std::thread([this, stems, base, baseName]() {
+		std::string result, error;
+		try {
+			beat::Trainer trainer(base, baseName);
+			std::vector<beat::Recording> recs;
+			for (const std::string& s : stems) {
+				if (adaptCancel)
+					break;
+				recs.push_back(beat::Recording::load(s));
+			}
+			if (!adaptCancel)
+				result = trainer.run(recs, adaptCancel, [this](const beat::Trainer::Progress& p) {
+					std::lock_guard<std::mutex> lock(adaptMutex);
+					adaptProg = p;
+				});
+		}
+		catch (const std::exception& e) {
+			error = e.what();
+		}
+		std::lock_guard<std::mutex> lock(adaptMutex);
+		adaptResult = result;
+		adaptError = error;
+		adaptDone = true;
+	});
+}
+
+beat::Trainer::Progress BeatDetector::adaptProgress() {
+	std::lock_guard<std::mutex> lock(adaptMutex);
+	return adaptProg;
+}
+
+void BeatDetector::pollAdapting() {
+	if (!adaptDone || !adaptThread.joinable())
+		return;
+	adaptThread.join();
+	beat::Trainer::Progress p = adaptProgress();
+	if (!adaptError.empty())
+		adaptStatus = "Adapting failed: " + adaptError;
+	else if (adaptCancel)
+		adaptStatus = "Adapting cancelled";
+	else if (adaptResult.empty())
+		adaptStatus = "No improvement on the held-back audio; model unchanged";
+	else {
+		char stamp[32];
+		std::time_t now = std::time(nullptr);
+		std::strftime(stamp, sizeof stamp, "adapted-%Y%m%d-%H%M%S.json", std::localtime(&now));
+		std::ofstream(system::join(userDir("models"), stamp)) << adaptResult;
+		adaptStatus = setModel(adaptResult, stamp)
+			? string::f("Loaded %s (held-back loss %.4f → %.4f)", stamp, p.baseLoss, p.bestLoss)
+			: "The adapted model didn't load: " + modelError;
+	}
+	adaptResult.clear();
 }
 
 bool BeatDetector::setModel(const std::string& json, const std::string& name) {
@@ -528,8 +608,10 @@ struct BeatDetectorWidget : ModuleWidget {
 	}
 
 	void step() override {
-		if (BeatDetector* m = getModule<BeatDetector>())
+		if (BeatDetector* m = getModule<BeatDetector>()) {
 			m->collect();
+			m->pollAdapting();
+		}
 		ModuleWidget::step();
 	}
 
@@ -571,7 +653,22 @@ struct BeatDetectorWidget : ModuleWidget {
 		else if (!clock)
 			sub->addChild(createMenuLabel("Patch the Clock input to record"));
 		sub->addChild(createMenuItem("Open recordings folder", "", [=]() { system::openDirectory(BeatDetector::userDir("recordings")); }));
-		sub->addChild(createMenuLabel("Adapt a model to them with beatref finetune"));
+
+		sub->addChild(new MenuSeparator);
+		if (m->adapting()) {
+			beat::Trainer::Progress p = m->adaptProgress();
+			sub->addChild(createMenuLabel(p.epoch ? string::f("Adapting: epoch %d of %d, held-back loss %.4f → %.4f", p.epoch, p.epochs,
+				p.baseLoss, p.bestLoss) : "Adapting: " + p.stage));
+			sub->addChild(createMenuItem("Cancel adapting", "", [=]() { m->cancelAdapting(); }));
+		}
+		else {
+			size_t n = recordingStems().size();
+			sub->addChild(createMenuItem("Adapt the model to the recordings", string::f("%zu", n), [=]() { m->startAdapting(); },
+				n == 0 || rec));
+			sub->addChild(createMenuLabel("Takes a few minutes in the background; or use beatref finetune"));
+			if (!m->adaptStatus.empty())
+				sub->addChild(createMenuLabel(m->adaptStatus));
+		}
 
 		sub->addChild(new MenuSeparator);
 		sub->addChild(createSubmenuItem("Model library", "", [=](Menu* lib) {
@@ -630,7 +727,8 @@ struct BeatDetectorWidget : ModuleWidget {
 			if (!m->modelError.empty())
 				sub->addChild(createMenuLabel(m->modelError));
 		}));
-		menu->addChild(createSubmenuItem("Learning mode", m->recording() ? "Recording" : "", [=](Menu* sub) { learningMenu(m, sub); }));
+		menu->addChild(createSubmenuItem("Learning mode", m->recording() ? "Recording" : m->adapting() ? "Adapting" : "",
+			[=](Menu* sub) { learningMenu(m, sub); }));
 		menu->addChild(createIndexPtrSubmenuItem("Onset detection", {"SuperFlux", "Spectral flux", "Complex domain", "HFC"}, &m->odf));
 		menu->addChild(createIndexPtrSubmenuItem("BPM CV scaling",
 			{"V/oct, 0 V = 120 BPM", "Linear, 10 V = 300 BPM", "Linear, 1 V = 100 BPM"}, &m->bpmScale));
