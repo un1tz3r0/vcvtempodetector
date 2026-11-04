@@ -92,7 +92,9 @@ audio with a beat grid aligned to it, in the same `time [beat-in-bar]` layout as
 The module's *Learning mode → Record* writes exactly that from the Clock input, and the
 [Colab notebook](notebooks/learning_mode.ipynb)
 ([open in Colab](https://colab.research.google.com/github/un1tz3r0/vcvtempodetector/blob/main/python/notebooks/learning_mode.ipynb))
-runs it on recordings in Google Drive.
+runs it on recordings in Google Drive. The module can also adapt in the background without
+Python (*Learning mode → Adapt the model to the recordings*), with a C++ port of this recipe;
+see [`plugin/`](../plugin/#learning-mode).
 
 - **What is adapted.** The top `layers` layers (default 3: the output layer and the top two
   convolutions, 25k of 110k parameters; 0 adapts all of them), with an L2-SP penalty
